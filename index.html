@@ -9,13 +9,19 @@
 
 <body>
 
-  <!-- Pantalla de inicio -->
-  <!-- Mejorar Vista con Tailwind CSS -->
   <div id="start-screen">
-    <h2>Bienvenido</h2>
-    <!-- <input id="name" placeholder="Nombre" />
-    <input id="email" placeholder="Correo" /> -->
-    <button id="startBtn">Iniciar Juego</button>
+    <main class="start-card">
+      <p class="eyebrow">Zaragoza, El Salvador</p>
+      <h1>Juego de<br /><span>Direcciones</span></h1>
+      <p class="intro">Aprende a preguntar, seguir y dar direcciones mientras recorres el centro de Zaragoza.</p>
+      <div class="start-actions">
+        <button id="startBtn" class="primary-action">Jugar ahora <span aria-hidden="true">→</span></button>
+        <a id="registerLink" class="secondary-action" href="#registro">Regístrate</a>
+      </div>
+      <button id="musicBtn" class="music-action" type="button" hidden>♫ Música: activar</button>
+      <p id="registerMessage" class="register-message" aria-live="polite"></p>
+      <small>Jugar no requiere una cuenta.</small>
+    </main>
   </div>
 
   <div id="game-container" style="display: none;"></div>

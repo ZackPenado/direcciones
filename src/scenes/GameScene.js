@@ -1,725 +1,245 @@
 import Phaser from 'phaser';
+import { GAME_SIZE, intersections, places, roadCells, streets } from '../data/mapData';
+import { createDirectionQuestion } from '../data/questionsData';
+import MissionService from '../services/missionService';
+import { createNavigationPlan, findShortestPath } from '../services/routeService';
+import { drawMap } from '../ui/mapRenderer';
+import DirectionOrderPanel from '../ui/directionOrderPanel';
+import RouteBriefingPanel from '../ui/routeBriefingPanel';
+import WordOrderPanel from '../ui/wordOrderPanel';
 
 export default class GameScene extends Phaser.Scene {
-    constructor() {
-        super('GameScene');
+  constructor() { super('GameScene'); }
+
+  preload() {
+    this.load.image('player', '/assets/cipitillo.png');
+    this.load.image('siguanaba', '/assets/Siguanaba.png');
+  }
+
+  create() {
+    drawMap(this, places);
+    this.isGamePaused = false;
+    this.gameEnded = false;
+    this.timeLeft = 300;
+    this.setupMission();
+    this.createPlayer();
+    this.createHud();
+    this.cursors = this.input.keyboard.createCursorKeys();
+    this.createTouchControls();
+    this.createTimer();
+    this.openQuestion();
+  }
+
+  setupMission() {
+    this.startPlace = Phaser.Utils.Array.GetRandom(places);
+    const possibleTargets = places.filter((place) => {
+      const path = findShortestPath(this.startPlace.node, place.node);
+      const startNode = intersections[this.startPlace.node];
+      const targetNode = intersections[place.node];
+      const distance = Phaser.Math.Distance.Between(startNode.x, startNode.y, targetNode.x, targetNode.y);
+      return place.id !== this.startPlace.id && path?.length === 2 && distance >= 150;
+    });
+    this.targetPlace = Phaser.Utils.Array.GetRandom(possibleTargets);
+    const plan = createNavigationPlan(this.startPlace, this.targetPlace);
+    this.mission = new MissionService(this.startPlace, this.targetPlace, plan);
+  }
+
+  createPlayer() {
+    const spawn = this.startPlace.target;
+    this.player = this.physics.add.sprite(spawn.centerX, spawn.centerY, 'player');
+    this.player.setDisplaySize(42, 42).setCollideWorldBounds(true).setDepth(4);
+  }
+
+  createHud() {
+    this.timerText = this.add.text(14, 12, '', { fontSize: '18px', color: '#14202b', fontStyle: 'bold' }).setDepth(10);
+    this.missionText = this.add.text(250, 8, '', {
+      fontSize: '14px', color: '#14202b', backgroundColor: '#ffffffdd', padding: { x: 9, y: 7 }, wordWrap: { width: 520 }
+    }).setDepth(10);
+    const greeting = window.playerData?.name ? `¡Hola, ${window.playerData.name}! ` : '';
+    this.updateHud(`${greeting}Resuelve la pregunta para recibir las indicaciones.`);
+  }
+
+  createTouchControls() {
+    const isTouchDevice = this.sys.game.device.input.touch || window.matchMedia('(pointer: coarse)').matches;
+    if (!isTouchDevice) return;
+    this.touchDirections = { left: false, right: false, up: false, down: false };
+    const buttons = [
+      { key: 'up', label: '▲', x: 730, y: 457 },
+      { key: 'left', label: '◀', x: 680, y: 507 },
+      { key: 'down', label: '▼', x: 730, y: 507 },
+      { key: 'right', label: '▶', x: 780, y: 507 }
+    ];
+    buttons.forEach(({ key, label, x, y }) => {
+      const button = this.add.text(x, y, label, {
+        fontSize: '24px', color: '#ffffff', backgroundColor: '#315069cc', padding: { x: 12, y: 7 }
+      }).setDepth(15).setOrigin(0.5).setInteractive();
+      button.on('pointerdown', () => { this.touchDirections[key] = true; });
+      button.on('pointerup', () => { this.touchDirections[key] = false; });
+      button.on('pointerout', () => { this.touchDirections[key] = false; });
+    });
+    this.input.on('pointerup', () => Object.keys(this.touchDirections).forEach((key) => { this.touchDirections[key] = false; }));
+  }
+
+  createTimer() {
+    this.time.addEvent({ delay: 1000, loop: true, callback: () => {
+      if (this.isGamePaused) return;
+      this.timeLeft -= 1;
+      this.updateHud();
+      if (this.timeLeft <= 0) this.endGame(false, '⏰ Se acabó el tiempo. La Siguanaba te encontró.');
+    }});
+  }
+
+  updateHud(message) {
+    this.timerText?.setText(`Tiempo: ${this.timeLeft}s`);
+    if (message) this.missionText?.setText(message);
+  }
+
+  openQuestion() {
+    this.isGamePaused = true;
+    const question = createDirectionQuestion(this.targetPlace);
+    this.questionPanel = new WordOrderPanel(this, question, (isCorrect) => this.handleQuestionAnswer(isCorrect));
+  }
+
+  handleQuestionAnswer(isCorrect) {
+    if (!isCorrect) {
+      this.questionPanel.destroy();
+      this.endGame(false, '❌ La oración no es correcta. La Siguanaba te atrapó.');
+      return;
     }
+    this.questionPanel.destroy();
+    this.showRouteBriefing();
+  }
 
-    preload() {
-        this.load.path = './public/assets/';
-        this.load.image('player', 'cipitillo.png');
+  showRouteBriefing() {
+    this.routeBriefing = new RouteBriefingPanel(
+      this,
+      this.targetPlace.name,
+      this.mission.instructions,
+      () => this.beginRoute()
+    );
+  }
+
+  beginRoute() {
+    this.routeBriefing.destroy();
+    this.mission.activate();
+    this.isGamePaused = false;
+    this.createDestinationMarker();
+    this.showActiveInstruction();
+  }
+
+  update() {
+    if (this.isGamePaused || !this.mission?.isNavigating) return;
+    const speed = 145;
+    let x = this.player.x;
+    let y = this.player.y;
+    if (this.cursors.left.isDown || this.touchDirections?.left) x -= speed / 60;
+    if (this.cursors.right.isDown || this.touchDirections?.right) x += speed / 60;
+    if (this.cursors.up.isDown || this.touchDirections?.up) y -= speed / 60;
+    if (this.cursors.down.isDown || this.touchDirections?.down) y += speed / 60;
+    if (this.isOnStreet(x, y)) this.player.setPosition(x, y);
+    this.checkRouteCells();
+    if (this.gameEnded) return;
+    this.checkWaypoint();
+    this.checkDestination();
+  }
+
+  isOnStreet(x, y) {
+    const bounds = this.player.getBounds();
+    const futureBounds = new Phaser.Geom.Rectangle(x - bounds.width / 2, y - bounds.height / 2, bounds.width, bounds.height);
+    return streets.some((street) => Phaser.Geom.Rectangle.ContainsRect(street.rect, futureBounds));
+  }
+
+  checkRouteCells() {
+    const currentCellIds = roadCells
+      .filter((cell) => Phaser.Geom.Rectangle.Contains(cell.rect, this.player.x, this.player.y))
+      .map((cell) => cell.id);
+    if (!this.mission.isCellAllowed(currentCellIds)) {
+      this.endGame(false, '❌ Te saliste de la ruta indicada. La Siguanaba te atrapó.');
     }
+  }
 
-    create() {
-        // Menú de pausa
-        this.pauseMenu = null;
+  createDestinationMarker() {
+    const target = this.targetPlace.target;
+    this.routeMarker = this.add.circle(target.centerX, target.centerY, 15, 0xffd54a, 0.8).setDepth(3);
+    this.tweens.add({ targets: this.routeMarker, scale: 1.35, duration: 500, yoyo: true, repeat: -1 });
+  }
 
-        // Player
-        this.player = this.physics.add.sprite(400, 300, 'player');
-        this.player.setScale(0.07);
-        this.player.setCollideWorldBounds(true);
-
-        // Controles
-        this.cursors = this.input.keyboard.createCursorKeys();
-
-        // Timer (5 minutos)
-        this.timeLeft = 300;
-
-        this.timerText = this.add.text(10, 10, 'Tiempo: 300', {
-            fontSize: '16px',
-            fill: '#fff'
-        });
-
-        this.gameTimer = this.time.addEvent({
-            delay: 1000,
-            loop: true,
-            callback: () => {
-                if (this.isGamePaused) return;
-
-                this.timeLeft--;
-                this.timerText.setText('Tiempo: ' + this.timeLeft);
-
-                if (this.timeLeft <= 0) {
-                    this.gameOver();
-                }
-            }
-        });
-
-        // Botones Play y Pause
-        this.pauseBtn = this.add.text(500, 10, '⏸ Pause', {
-            fontSize: '16px',
-            fill: '#fff',
-            backgroundColor: '#333',
-            padding: { x: 8, y: 4 }
-        })
-            .setInteractive()
-            .on('pointerdown', () => this.pauseGame());
-
-        // Flag para pausar escena
-        this.isGamePaused = false;
-
-        this.playBtn = this.add.text(500, 10, '▶ Play', {
-            fontSize: '16px',
-            fill: '#fff',
-            backgroundColor: '#333',
-            padding: { x: 8, y: 4 }
-        })
-            .setInteractive()
-            .on('pointerdown', () => this.playGame());
-
-        this.playBtn.setVisible(false);
-
-        // Grupo de calles (zonas válidas)
-        this.streets = [
-            {
-                name: "5ta avenida",
-                rect: new Phaser.Geom.Rectangle(100, 250, 600, 90)
-            },
-            {
-                name: "calle central",
-                rect: new Phaser.Geom.Rectangle(350, 100, 90, 400)
-            }
-        ];
-
-        // Modelando el mapa
-        // En create() o en un módulo separado
-        this.nodes = {
-            A: { x: 100, y: 285 }, // izquierda
-            B: { x: 400, y: 285 }, // centro (cruce)
-            C: { x: 700, y: 285 }, // derecha
-            D: { x: 400, y: 100 }, // arriba
-            E: { x: 400, y: 500 }  // abajo
-        };
-
-        // Conexiones (bidireccionales)
-        this.graph = {
-            A: ['B'],
-            B: ['A', 'C', 'D', 'E'],
-            C: ['B'],
-            D: ['B'],
-            E: ['B']
-        };
-
-        // Mapea cada arista a una calle
-        this.edgeStreet = {
-            'A-B': '5ta avenida',
-            'B-C': '5ta avenida',
-            'B-D': 'calle central',
-            'B-E': 'calle central'
-        };
-
-        this.graphics = this.add.graphics();
-        this.graphics.lineStyle(2, 0x00ff00);
-
-        this.streets.forEach(street => {
-            this.graphics.strokeRectShape(street.rect);
-
-            this.add.text(
-                street.rect.x + 80,
-                street.rect.y - 20,
-                street.name,
-                {
-                    fontSize: '12px',
-                    fill: '#00ff00'
-                }
-            );
-        });
-
-        this.places = [
-            {
-                name: 'Iglesia',
-                zone: new Phaser.Geom.Rectangle(650, 250, 80, 70),
-                street: "5ta avenida",
-                visited: false,
-                node: 'C'
-            },
-            {
-                name: 'Alcaldía',
-                zone: new Phaser.Geom.Rectangle(100, 250, 80, 70),
-                street: "5ta avenida",
-                visited: false,
-                node: 'A'
-            }
-        ];
-
-        this.graphics.lineStyle(2, 0xff0000);
-
-        this.places.forEach(place => {
-            this.graphics.strokeRectShape(place.zone);
-
-            this.add.text(place.zone.x, place.zone.y - 15, place.name, {
-                fontSize: '12px',
-                fill: '#ff0000'
-            });
-        });
-
-        // Reto 1: Preguntar dirección
-        this.hasDoneFirstQuestion = false;
-
-        this.currentQuestion = {
-            question: "Ordena la oración:",
-            correct: ["¿", "Dónde", "queda", "la", "iglesia", "?"],
-            options: ["iglesia", "¿", "Dónde", "la", "queda", "?"]
-        };
-
-        // Reto 2: Seguir direcciones
-        this.currentMission = {
-            steps: [
-                { type: "street", value: "5ta avenida" },
-                { type: "turn", value: "right", ref: "Banco" },
-                { type: "reach", value: "Iglesia" }
-            ],
-            currentStep: 0
-        };
-
-        this.selectedWords = [];
-
-        // Detectar posición previa del player
-        this.prevPosition = { x: this.player.x, y: this.player.y };
+  checkWaypoint() {
+    const waypoint = this.mission.currentWaypoint;
+    if (!waypoint) return;
+    if (Phaser.Math.Distance.Between(this.player.x, this.player.y, waypoint.x, waypoint.y) <= 14) {
+      this.mission.reachWaypoint();
+      this.confirmStep(`✓ Paso ${this.mission.currentStep} completado`);
     }
+  }
 
-    update() {
-        if (this.isQuestionActive || this.isGamePaused) return; // 🚫 bloquea movimiento
-
-        const speed = 150;
-
-        let newX = this.player.x;
-        let newY = this.player.y;
-
-        if (this.cursors.left.isDown) {
-            newX -= speed * 0.016;
-        } else if (this.cursors.right.isDown) {
-            newX += speed * 0.016;
-        }
-
-        if (this.cursors.up.isDown) {
-            newY -= speed * 0.016;
-        } else if (this.cursors.down.isDown) {
-            newY += speed * 0.016;
-        }
-
-        // Validar si la nueva posición está en calle
-        if (this.isOnStreet(newX, newY)) {
-            this.player.setPosition(newX, newY);
-        }
-
-        this.checkPlaces();
-
-        this.checkMissionProgress();
-
-        // Debug dinamico en tiempo real
-        /* const currentStreet = this.isOnStreet(this.player.x, this.player.y);
-
-        if (currentStreet) {
-            console.log("Estás en:", currentStreet.name);
-        } */
+  checkDestination() {
+    if (this.mission.currentStep !== 2) return;
+    const target = this.targetPlace.target;
+    if (Phaser.Math.Distance.Between(this.player.x, this.player.y, target.centerX, target.centerY) <= 18) {
+      this.mission.reachDestination();
+      this.startDirectionChallenge();
     }
+  }
 
-    gameOver() {
-        this.scene.pause();
+  startDirectionChallenge() {
+    this.isGamePaused = true;
+    this.routeMarker?.destroy();
+    this.showTemporaryMessage(`¡Llegaste a ${this.targetPlace.name}! Ahora ayuda a un habitante.`, '#1e7041');
+    const returnPlan = createNavigationPlan(this.targetPlace, this.startPlace);
+    this.directionPanel = new DirectionOrderPanel(
+      this,
+      this.startPlace.name,
+      returnPlan.instructions,
+      (isCorrect) => this.handleDirectionAnswer(isCorrect)
+    );
+  }
 
-        this.add.text(200, 250, '⏰ Tiempo agotado', {
-            fontSize: '28px',
-            fill: '#ff0000'
-        });
-
-        this.add.text(200, 300, 'La Siguanaba te atrapó 👻', {
-            fontSize: '22px',
-            fill: '#fff'
-        });
+  handleDirectionAnswer(isCorrect) {
+    this.directionPanel.destroy();
+    if (!isCorrect) {
+      this.endGame(false, '❌ Las indicaciones no están en el orden correcto. La Siguanaba te atrapó.');
+      return;
     }
-
-    isOnStreet(nextX, nextY) {
-        const bounds = this.player.getBounds();
-
-        const futureBounds = new Phaser.Geom.Rectangle(
-            nextX - bounds.width / 2,
-            nextY - bounds.height / 2,
-            bounds.width,
-            bounds.height
-        );
-
-        return this.streets.find(street =>
-            Phaser.Geom.Rectangle.ContainsRect(street.rect, futureBounds)
-        );
-    }
-
-    checkPlaces() {
-        this.places.forEach(place => {
-            if (!place.visited &&
-                Phaser.Geom.Rectangle.Contains(place.zone, this.player.x, this.player.y)) {
-
-                place.visited = true;
-                this.onReachPlace(place);
-            }
-        });
-    }
-
-    onReachPlace(place) {
-        if (!this.hasDoneFirstQuestion) {
-            this.hasDoneFirstQuestion = true;
-            this.showQuestion();
-            return; // importante: no continuar flujo normal
-        }
-    }
-
-    showQuestion() {
-        this.isQuestionActive = true;
-        this.selectedWords = []; // 🔥 importante resetear
-
-        // Fondo
-        this.questionUI = [];
-
-        const bg = this.add.rectangle(400, 300, 700, 400, 0x000000, 0.8);
-        this.questionUI.push(bg);
-
-        const title = this.add.text(250, 120, this.currentQuestion.question, {
-            fontSize: '20px',
-            fill: '#fff'
-        });
-        this.questionUI.push(title);
-
-        this.answerText = this.add.text(200, 180, "", {
-            fontSize: '22px',
-            fill: '#00ff00'
-        });
-        this.questionUI.push(this.answerText);
-
-        this.optionTexts = [];
-
-        this.currentQuestion.options.forEach((word, index) => {
-            const txt = this.add.text(200 + (index * 100), 300, word, {
-                fontSize: '18px',
-                backgroundColor: '#333',
-                padding: { x: 5, y: 5 }
-            })
-                .setInteractive()
-                .on('pointerdown', () => this.selectWord(word, txt));
-
-            this.optionTexts.push(txt);
-            this.questionUI.push(txt);
-        });
-
-        const btn = this.add.text(350, 400, "Validar", {
-            fontSize: '20px',
-            backgroundColor: '#00aa00',
-            padding: { x: 10, y: 5 }
-        })
-            .setInteractive()
-            .on('pointerdown', () => this.validateAnswer());
-
-        this.questionUI.push(btn);
-    }
-
-    selectWord(word, textObj) {
-        this.selectedWords.push(word);
-
-        this.answerText.setText(this.selectedWords.join(" "));
-
-        textObj.disableInteractive();
-        textObj.setAlpha(0.5);
-    }
-
-    validateAnswer() {
-        const correct = this.currentQuestion.correct.join(" ");
-        const user = this.selectedWords.join(" ");
-
-        if (user === correct) {
-            this.onCorrectAnswer();
-        } else {
-            this.onWrongAnswer();
-        }
-    }
-
-    onCorrectAnswer() {
-        this.clearQuestionUI();
-        this.isQuestionActive = false;
-
-        this.showTemporaryMessage(250, 250, "✅ Correcto!", {
-            fontSize: '24px',
-            fill: '#00ff00'
-        });
-
-        // 🔥 Generar misión real
-        this.time.delayedCall(1000, () => {
-            this.startMissionFromPlayer();
-        });
-    }
-
-    onWrongAnswer() {
-        this.isQuestionActive = true;
-
-        this.add.text(200, 250, "❌ Incorrecto...", {
-            fontSize: '24px',
-            fill: '#ff0000'
-        });
-
-        this.add.text(180, 300, "La Siguanaba te atrapó 👻", {
-            fontSize: '22px',
-            fill: '#fff'
-        });
-
-        // Aquí luego metemos animación
-    }
-
-    clearQuestionUI() {
-        this.questionUI.forEach(el => el.destroy());
-        this.questionUI = [];
-    }
-
-    checkMissionProgress() {
-        if (!this.currentMission) return;
-
-        const step = this.currentMission.steps[this.currentMission.currentStep];
-        if (!step) return;
-
-        const currentStreet = this.isOnStreet(this.player.x, this.player.y);
-
-        switch (step.type) {
-
-            case "street":
-                if (currentStreet && currentStreet.name !== step.value) {
-                    this.failMission();
-                    return;
-                }
-
-                if (currentStreet && currentStreet.name === step.value) {
-                    console.log("✔ Paso 1 correcto");
-                    this.currentMission.currentStep++;
-                }
-                break;
-
-            case "turn":
-                this.checkTurn(step);
-                break;
-
-            case "reach":
-                this.checkReach(step);
-                break;
-        }
-    }
-
-    checkTurn(step) {
-        const dx = this.player.x - this.prevPosition.x;
-        const dy = this.player.y - this.prevPosition.y;
-
-        const movingRight = dx > 0;
-        const movingLeft = dx < 0;
-        const movingUp = dy < 0;
-        const movingDown = dy > 0;
-
-        // Simplificación: detectar cambio de dirección
-        if (movingRight && step.value === "right") {
-            console.log("✔ Giro correcto");
-            this.currentMission.currentStep++;
-        }
-
-        this.prevPosition = { x: this.player.x, y: this.player.y };
-    }
-
-    checkReach(step) {
-        const place = this.places.find(p => p.name === step.value);
-
-        if (
-            place &&
-            Phaser.Geom.Rectangle.Contains(place.zone, this.player.x, this.player.y)
-        ) {
-            console.log("🎉 Llegaste correctamente");
-            this.completeMission();
-        }
-    }
-
-    completeMission() {
-        this.currentMission = null;
-
-        this.showTemporaryMessage(200, 200, "✅ Ruta completada", {
-            fontSize: '24px',
-            fill: '#00ff00'
-        });
-    }
-
-    failMission() {
-        this.currentMission = null;
-
-        this.showTemporaryMessage(200, 250, "❌ Te perdiste...", {
-            fontSize: '24px',
-            fill: '#ff0000'
-        });
-
-        this.showTemporaryMessage(180, 300, "La Siguanaba te atrapó 👻", {
-            fontSize: '22px',
-            fill: '#fff'
-        });
-    }
-
-    generateMissionGPS(startPlaceName, targetPlaceName) {
-        const start = this.places.find(p => p.name === startPlaceName);
-        const target = this.places.find(p => p.name === targetPlaceName);
-
-        if (!start || !target) return;
-
-        const path = this.findPath(start.node, target.node);
-
-        if (!path) {
-            console.log("❌ No hay ruta");
-            return;
-        }
-
-        const steps = this.generateStepsFromPath(path, target);
-
-        this.currentMission = {
-            steps,
-            currentStep: 0
-        };
-
-        console.log("🧭 Ruta:", path);
-        console.log("📍 Steps:", steps);
-
-        this.showMissionText();
-    }
-
-    startMissionFromPlayer() {
-        const currentPlace = this.places.find(place =>
-            Phaser.Geom.Rectangle.Contains(place.zone, this.player.x, this.player.y)
-        );
-
-        if (!currentPlace) {
-            console.log("⚠️ No estás en un lugar válido");
-            return;
-        }
-
-        // Ejemplo: siempre ir a la Iglesia (luego lo hacemos dinámico)
-        this.generateMissionGPS(currentPlace.name, "Iglesia");
-
-        this.showMissionText();
-    }
-
-    showMissionText() {
-        const steps = this.currentMission.steps;
-
-        let text = "Indicaciones:\n";
-
-        steps.forEach((step, i) => {
-            if (step.type === "street") {
-                text += `${i + 1}. Ve por ${step.value}\n`;
-            }
-
-            if (step.type === "turn") {
-                text += `${i + 1}. Gira a la ${step.value}\n`;
-            }
-
-            if (step.type === "reach") {
-                text += `${i + 1}. Llega a ${step.value}\n`;
-            }
-        });
-
-        this.missionText = this.add.text(10, 500, text, {
-            fontSize: '14px',
-            fill: '#ffffff',
-            backgroundColor: '#000'
-        });
-    }
-
-    findPath(startNode, endNode) {
-        const queue = [[startNode]];
-        const visited = new Set();
-
-        while (queue.length > 0) {
-            const path = queue.shift();
-            const node = path[path.length - 1];
-
-            if (node === endNode) return path;
-
-            if (!visited.has(node)) {
-                visited.add(node);
-
-                this.graph[node].forEach(neighbor => {
-                    const newPath = [...path, neighbor];
-                    queue.push(newPath);
-                });
-            }
-        }
-
-        return null;
-    }
-
-    getDirection(from, to) {
-        const dx = to.x - from.x;
-        const dy = to.y - from.y;
-
-        if (Math.abs(dx) > Math.abs(dy)) {
-            return dx > 0 ? 'right' : 'left';
-        } else {
-            return dy > 0 ? 'down' : 'up';
-        }
-    }
-
-    getTurn(prevDir, newDir) {
-        const turns = {
-            up: { left: 'left', right: 'right' },
-            down: { left: 'right', right: 'left' },
-            left: { up: 'right', down: 'left' },
-            right: { up: 'left', down: 'right' }
-        };
-
-        return turns[prevDir]?.[newDir] || null;
-    }
-
-    generateStepsFromPath(path, targetPlace) {
-        const steps = [];
-
-        let prevDir = null;
-
-        for (let i = 0; i < path.length - 1; i++) {
-            const from = this.nodes[path[i]];
-            const to = this.nodes[path[i + 1]];
-
-            const edgeKey = `${path[i]}-${path[i + 1]}`;
-            const reverseKey = `${path[i + 1]}-${path[i]}`;
-
-            const street = this.edgeStreet[edgeKey] || this.edgeStreet[reverseKey];
-
-            const dir = this.getDirection(from, to);
-
-            // Primer paso: calle
-            if (i === 0) {
-                steps.push({ type: "street", value: street });
-            }
-
-            // Detectar giro
-            if (prevDir && dir !== prevDir) {
-                const turn = this.getTurn(prevDir, dir);
-
-                if (turn) {
-                    steps.push({
-                        type: "turn",
-                        value: turn,
-                        ref: "intersección"
-                    });
-                }
-            }
-
-            prevDir = dir;
-        }
-
-        // Último paso: destino
-        steps.push({
-            type: "reach",
-            value: targetPlace.name
-        });
-
-        return steps;
-    }
-
-    showTemporaryMessage(x, y, text, style, duration = 3000) {
-        const message = this.add.text(x, y, text, style);
-
-        this.tweens.add({
-            targets: message,
-            alpha: 0,
-            duration: 500,
-            delay: duration - 500,
-            onComplete: () => message.destroy()
-        });
-
-        return message;
-    }
-
-    pauseGame() {
-        if (this.isGamePaused) return;
-        this.showPauseMenu();
-    }
-
-    showPauseMenu() {
-        this.isGamePaused = true;
-
-        // Contenedor
-        this.pauseMenu = this.add.container(0, 0);
-
-        // Fondo oscuro
-        const bg = this.add.rectangle(400, 300, 800, 600, 0x000000, 0.7);
-
-        // Panel
-        const panel = this.add.rectangle(400, 300, 300, 250, 0x222222);
-
-        const title = this.add.text(330, 200, "PAUSA", {
-            fontSize: '28px',
-            fill: '#fff'
-        });
-
-        // Botón Reanudar
-        const resumeBtn = this.add.text(320, 260, "▶ Reanudar", {
-            fontSize: '20px',
-            backgroundColor: '#00aa00',
-            padding: { x: 10, y: 5 }
-        })
-            .setInteractive()
-            .on('pointerdown', () => this.hidePauseMenu());
-
-        // Botón Reiniciar misión
-        const restartBtn = this.add.text(300, 310, "🔄 Reiniciar misión", {
-            fontSize: '18px',
-            backgroundColor: '#ffaa00',
-            padding: { x: 10, y: 5 }
-        })
-            .setInteractive()
-            .on('pointerdown', () => this.restartMission());
-
-        // Botón salir
-        const exitBtn = this.add.text(340, 360, "❌ Salir", {
-            fontSize: '18px',
-            backgroundColor: '#aa0000',
-            padding: { x: 10, y: 5 }
-        })
-            .setInteractive()
-            .on('pointerdown', () => this.scene.restart());
-
-        // Agregar todo al contenedor
-        this.pauseMenu.add([
-            bg,
-            panel,
-            title,
-            resumeBtn,
-            restartBtn,
-            exitBtn
-        ]);
-
-        // Ocultar botón pause
-        this.pauseBtn.setVisible(false);
-    }
-
-    hidePauseMenu() {
-        this.isGamePaused = false;
-
-        this.pauseMenu.destroy();
-        this.pauseMenu = null;
-
-        this.pauseBtn.setVisible(true);
-    }
-
-    restartMission() {
-        this.hidePauseMenu();
-
-        if (!this.currentMission) return;
-
-        this.currentMission.currentStep = 0;
-
-        this.showTemporaryMessage(250, 200, "🔄 Misión reiniciada", {
-            fontSize: '20px',
-            fill: '#ffff00'
-        });
-    }
-
-    restartMission() {
-        this.hidePauseMenu();
-
-        if (!this.currentMission) return;
-
-        this.currentMission.currentStep = 0;
-
-        this.showTemporaryMessage(250, 200, "🔄 Misión reiniciada", {
-            fontSize: '20px',
-            fill: '#ffff00'
-        });
-    }
+    this.endGame(true, `🎉 ¡Excelente! Ayudaste al habitante a llegar a ${this.startPlace.name}.`);
+  }
+
+  confirmStep(text) {
+    this.isGamePaused = true;
+    this.showTemporaryMessage(text, '#1e7041');
+    this.time.delayedCall(2000, () => {
+      if (this.gameEnded) return;
+      this.isGamePaused = false;
+      this.showActiveInstruction();
+    });
+  }
+
+  showActiveInstruction() {
+    const stepNumber = this.mission.currentStep + 1;
+    this.updateHud(`Paso ${stepNumber} de 3: ${this.mission.instructions[this.mission.currentStep]}`);
+  }
+
+  showTemporaryMessage(text, color) {
+    const message = this.add.text(400, 90, text, {
+      fontSize: '18px', color, backgroundColor: '#ffffff', padding: { x: 9, y: 6 }
+    }).setDepth(12).setOrigin(0.5);
+    this.tweens.add({ targets: message, alpha: 0, delay: 1300, duration: 500, onComplete: () => message.destroy() });
+  }
+
+  endGame(success, message) {
+    if (this.gameEnded) return;
+    this.gameEnded = true;
+    this.isGamePaused = true;
+    this.add.rectangle(400, 300, GAME_SIZE.width, GAME_SIZE.height, 0x0d1720, 0.82).setDepth(20);
+    const playerName = window.playerData?.name;
+    const finalMessage = success && playerName ? `¡${playerName}!\n${message}` : message;
+    this.add.text(400, 270, finalMessage, {
+      fontSize: '26px', color: success ? '#b7f7c5' : '#ffd1d1', align: 'center', wordWrap: { width: 610 }
+    }).setDepth(21).setOrigin(0.5);
+    if (!success) this.add.image(400, 385, 'siguanaba').setDisplaySize(105, 105).setDepth(21);
+    const restart = this.add.text(400, success ? 380 : 480, 'Jugar de nuevo', {
+      fontSize: '21px', color: '#ffffff', backgroundColor: '#315069', padding: { x: 16, y: 10 }
+    }).setDepth(21).setOrigin(0.5).setInteractive();
+    restart.on('pointerdown', () => this.scene.restart());
+  }
 }
